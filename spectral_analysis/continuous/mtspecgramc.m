@@ -1,103 +1,173 @@
 function [S,t,f,Serr]=mtspecgramc(data,movingwin,params)
-% Multi-taper time-frequency spectrum - continuous process
+%MTSPECGRAMC Multi-taper spectrogram for continuous data.
 %
-% Usage:
-% [S,t,f,Serr]=mtspecgramc(data,movingwin,params)
-% Input: 
-% Note units have to be consistent. Thus, if movingwin is in seconds, Fs
-% has to be in Hz. see chronux.m for more information.
-%       data        (in form samples x channels/trials) -- required
-%       movingwin         (in the form [window winstep] i.e length of moving
-%                                                 window and step size)
-%                                                 Note that units here have
-%                                                 to be consistent with
-%                                                 units of Fs - required
-%       params: structure with fields tapers, pad, Fs, fpass, err, trialave
-%       - optional
-%           tapers : precalculated tapers from dpss or in the one of the following
-%                    forms: 
-%                    (1) A numeric vector [TW K] where TW is the
-%                        time-bandwidth product and K is the number of
-%                        tapers to be used (less than or equal to
-%                        2TW-1). 
-%                    (2) A numeric vector [W T p] where W is the
-%                        bandwidth, T is the duration of the data and p 
-%                        is an integer such that 2TW-p tapers are used. In
-%                        this form there is no default i.e. to specify
-%                        the bandwidth, you have to specify T and p as
-%                        well. Note that the units of W and T have to be
-%                        consistent: if W is in Hz, T must be in seconds
-%                        and vice versa. Note that these units must also
-%                        be consistent with the units of params.Fs: W can
-%                        be in Hz if and only if params.Fs is in Hz.
-%                        The default is to use form 1 with TW=3 and K=5
-%                     Note that T has to be equal to movingwin(1).
+%   [S,t,f,Serr] = mtspecgramc(data,movingwin,params)
 %
-%	        pad		    (padding factor for the FFT) - optional (can take values -1,0,1,2...). 
-%                    -1 corresponds to no padding, 0 corresponds to padding
-%                    to the next highest power of 2 etc.
-%			      	 e.g. For N = 500, if PAD = -1, we do not pad; if PAD = 0, we pad the FFT
-%			      	 to 512 points, if pad=1, we pad to 1024 points etc.
-%			      	 Defaults to 0.
-%           Fs   (sampling frequency) - optional. Default 1.
-%           fpass    (frequency band to be used in the calculation in the form
-%                                   [fmin fmax])- optional. 
-%                                   Default all frequencies between 0 and Fs/2
-%           err  (error calculation [1 p] - Theoretical error bars; [2 p] - Jackknife error bars
-%                                   [0 p] or 0 - no error bars) - optional. Default 0.
-%           trialave (average over trials/channels when 1, don't average when 0) - optional. Default 0
-% Output:
-%       S       (spectrum in form time x frequency x channels/trials if trialave=0; 
-%               in the form time x frequency if trialave=1)
-%       t       (times)
-%       f       (frequencies)
-%       Serr    (error bars) only for err(1)>=1
+%   Computes the time-frequency spectrum of a continuous signal by applying
+%   Chronux multi-taper spectral estimation within sliding windows.
+%
+%   INPUTS
+%       data
+%           Continuous data arranged as:
+%               samples x channels/trials
+%
+%       movingwin
+%           Two-element vector specifying the sliding-window configuration:
+%               [window_length  step_size]
+%           The units must be consistent with params.Fs. For example, if
+%           movingwin is given in seconds, then Fs must be in Hz.
+%
+%       params
+%           Structure of analysis parameters with fields:
+%
+%           tapers
+%               Either precomputed DPSS tapers, or one of the following:
+%
+%               (1) [TW K]
+%                   TW : time-bandwidth product
+%                   K  : number of tapers to use, with K <= 2*TW - 1
+%
+%               (2) [W T p]
+%                   W : bandwidth
+%                   T : duration of the data
+%                   p : integer such that 2*TW - p tapers are used
+%
+%                   In this form, T must equal movingwin(1). Units of W and
+%                   T must be consistent with each other and with params.Fs.
+%
+%               Default: form (1) with TW = 3 and K = 5
+%
+%           pad
+%               Padding factor for the FFT. Allowed values are -1,0,1,2,...
+%               -1 : no padding
+%                0 : pad to next power of 2
+%                1 : pad to twice the next power of 2, etc.
+%               Default: 0
+%
+%           Fs
+%               Sampling frequency. Default: 1
+%
+%           fpass
+%               Frequency band of interest in the form [fmin fmax].
+%               Default: [0 Fs/2]
+%
+%           err
+%               Error bar option:
+%                   [1 p] : theoretical error bars
+%                   [2 p] : jackknife error bars
+%                   [0 p] or 0 : no error bars
+%               Default: 0
+%
+%           trialave
+%               If 1, average across channels/trials.
+%               If 0, return separate spectra for each channel/trial.
+%               Default: 0
+%
+%   OUTPUTS
+%       S
+%           Spectrogram.
+%           If trialave = 0:
+%               time x frequency x channels/trials
+%           If trialave = 1:
+%               time x frequency
+%
+%       t
+%           Time vector corresponding to the center of each analysis window.
+%
+%       f
+%           Frequency vector.
+%
+%       Serr
+%           Error bars, returned only when err(1) >= 1.
+%
+%   NOTES
+%       - This function uses sliding windows and calls mtspectrumc on each
+%         windowed segment.
+%       - Window centers are reported in the same time units implied by Fs.
 
 if nargin < 2; error('Need data and window parameters'); end;
 if nargin < 3; params=[]; end;
 
+% Validate that the taper duration matches the moving-window duration when
+% tapers are supplied in the [W T p] form.
 if length(params.tapers)==3 & movingwin(1)~=params.tapers(2);
     error('Duration of data in params.tapers is inconsistent with movingwin(1), modify params.tapers(2) to proceed')
 end
+
+% Parse analysis parameters and fill in defaults where needed.
 [tapers,pad,Fs,fpass,err,trialave,params]=getparams(params);
 
-
+% Error bars cannot be requested if err(1) indicates no error computation.
 if nargout > 3 && err(1)==0; 
 %   Cannot compute error bars with err(1)=0. change params and run again.
     error('When Serr is desired, err(1) has to be non-zero.');
 end;
+
+% Ensure the data are arranged as samples x channels/trials.
 data=change_row_to_column(data);
+
+% Extract data dimensions.
 [N,Ch]=size(data);
+
+% Convert window length and step size from time units to samples.
 Nwin=round(Fs*movingwin(1)); % number of samples in window
 Nstep=round(movingwin(2)*Fs); % number of samples to step through
+
+% Compute FFT length, allowing optional zero-padding.
 nfft=max(2^(nextpow2(Nwin)+pad),Nwin);
-f=getfgrid(Fs,nfft,fpass); Nf=length(f);
+
+% Construct the frequency grid restricted to the requested passband.
+f=getfgrid(Fs,nfft,fpass); 
+Nf=length(f);
+
+% Generate/check DPSS tapers for the requested window length.
 params.tapers=dpsschk(tapers,Nwin,Fs); % check tapers
 
-winstart=1:Nstep:N-Nwin+1;
-nw=length(winstart); 
+% Previous direct indexing approach retained for reference.
+% winstart=1:Nstep:N-Nwin+1;
+% nw=length(winstart); 
 
+% Sliding-window configuration in time units.
+T_win = movingwin(1);
+T_step = movingwin(2);
+
+% Compute sample indices for all sliding windows.
+idx_win = get_sliding_window_indices(N,T_win,T_step,Fs);
+nw = size(idx_win,1);
+
+% Preallocate output arrays based on whether spectra are averaged across
+% channels/trials.
 if trialave
     S = zeros(nw,Nf);
-    if nargout==4; Serr=zeros(2,nw,Nf); end;
+    if nargout==4; Serr=zeros(2,nw,Nf); end
 else
     S = zeros(nw,Nf,Ch);
-    if nargout==4; Serr=zeros(2,nw,Nf,Ch); end;
+    if nargout==4; Serr=zeros(2,nw,Nf,Ch); end
 end
 
-for n=1:nw;
-   indx=winstart(n):winstart(n)+Nwin-1;
+% Loop over windows and compute the multi-taper spectrum for each segment.
+for n=1:nw
+   indx=idx_win(n,:);%winstart(n):winstart(n)+Nwin-1;
    datawin=data(indx,:);
+   
    if nargout==4
+     % Compute spectrum and corresponding error bars for this window.
      [s,f,serr]=mtspectrumc(datawin,params);
      Serr(1,n,:,:)=squeeze(serr(1,:,:));
      Serr(2,n,:,:)=squeeze(serr(2,:,:));
    else
+     % Compute spectrum only.
      [s,f]=mtspectrumc(datawin,params);
    end
+   
+   % Store the spectrum for the current window.
    S(n,:,:)=s;
-end;
+end
+
+% Remove singleton dimensions introduced during preallocation.
 S=squeeze(S); 
-if nargout==4;Serr=squeeze(Serr);end;
-winmid=winstart+round(Nwin/2);
+if nargout==4;Serr=squeeze(Serr);end
+
+% Compute the center time of each window in seconds (or consistent Fs units).
+winmid=(idx_win(:,1) + idx_win(:,end))/2;%winstart+round(Nwin/2);
 t=winmid/Fs;
